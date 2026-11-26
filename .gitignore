@@ -13,3 +13,5 @@ data/processed/tmp/
 data/processed/clusters_all_seqs.fasta
 data/processed/clusters_rep_seq.fasta
 .DS_Store
+# predictor output
+outputs/

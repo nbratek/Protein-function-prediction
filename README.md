@@ -1,6 +1,6 @@
 # Protein function prediction
 
-Dataset for predicting Gene Ontology (GO) terms from protein sequences of human, mouse and zebrafish.
+Predicting Gene Ontology (GO) terms from protein sequences of human, mouse and zebrafish.
 
 ## Data
 
@@ -20,7 +20,8 @@ Dataset for predicting Gene Ontology (GO) terms from protein sequences of human,
    - propagates the terms to all their ancestors over `is_a` and `part_of` (true path rule) and splits them into MF, BP and CC, without the three root terms
 2. `split.py` clusters the sequences with MMseqs2 (≥ 50% identity, ≥ 80% coverage of both sequences) and puts whole clusters into train, eval or test (80/10/10).
    Clusters are visited in random order and each goes to the split that is furthest below its target, so all splits get a similar mix of cluster sizes.
-3. `vocab.py` builds the label vocabulary of each ontology from the **train split only** (terms with at least 50 train proteins).
+   Each split is saved as TSV (annotations) and FASTA (sequences, the predictor input).
+3. `vocab.py` builds the label vocabulary of each ontology from the **train split only** (terms with at least M = 50 train proteins, change with `--min-count`).
 
 Train and evaluate each ontology only on proteins that have at least one label in it.
 
@@ -33,6 +34,8 @@ uv sync
 uv run merge.py
 uv run split.py
 uv run vocab.py
+uv run predict.py data/processed/test.fasta -o outputs/test_predictions.csv
+uv run pytest
 ```
 
 | File | Content |
@@ -42,6 +45,7 @@ uv run vocab.py
 | `proteins_hq.fasta` | sequences after the evidence code filter |
 | `clusters_cluster.tsv` | MMseqs2 output (cluster representative, protein) |
 | `train.tsv`, `eval.tsv`, `test.tsv` | final split |
+| `train.fasta`, `eval.fasta`, `test.fasta` | sequences of each split |
 | `vocab_mf.tsv`, `vocab_bp.tsv`, `vocab_cc.tsv` | label vocabulary (go_id, number of train proteins) |
 
 ## Results
@@ -56,3 +60,42 @@ Number of clusters: 14164
 | Total | 23,741 (80%) | 2,970 (10%) | 2,969 (10%) |
 
 Singletons make up 15-16% of the proteins in every split.
+
+## Predictor (end-to-end skeleton)
+
+`predict.py` reads a multi-protein FASTA file and writes a score for every protein and every GO term of the three vocabularies.
+The model is a placeholder for now (random scores). Input, encoding, batching and output are meant to stay when a real model is plugged in.
+
+```bash
+uv run predict.py data/processed/test.fasta -o outputs/test_predictions.csv
+```
+
+```
+FASTA --skbio--> (ID, sequence) --encode--> x (B, 22, 1024) + mask (B, 1024) --+--> MF model --> (B, 370)
+                                                                               +--> BP model --> (B, 1993)  --sigmoid--> CSV
+                                                                               +--> CC model --> (B, 365)
+```
+
+- **Input**: FASTA parsed with `skbio.io.read(..., constructor=skbio.Protein)`. The protein ID is the header up to the first space.
+- **Encoding**: one-hot tensor `(B, N, D)` with N = 22 tokens (20 standard amino acids, `X` for unknown and non-standard residues, `PAD`) and D = 1024 (`--max-len`).
+  Shorter sequences are padded, longer ones keep their first D residues. The bool mask `(B, D)` is `True` for residues and `False` for padding.
+- **Models**: one per ontology, `forward(x, mask)` returns logits `(B, P)`, where P is the size of the ontology vocabulary read from `vocab_*.tsv` (MF 370, BP 1993, CC 365 for M = 50).
+  `DummyModel` ignores the sequence and returns random logits. The predictor applies a sigmoid, so a real model can be trained with `BCEWithLogitsLoss`.
+- **Output**: CSV `ProteinID,GOterm,Score`, one row per protein and GO term (2,728 rows per protein, scores rounded to 4 decimals).
+  The test split gives 8.1 M rows (~200 MB); an output path ending with `.gz` compresses the file.
+- **Options**: `--model`, `--vocab-dir`, `--batch-size` (32), `--max-len` (1024), `--seed` (42, fixes the random scores), `--device` (`cpu`, `cuda`, `mps`).
+
+Rare terms: the vocabulary only has terms annotated to at least M train proteins, so P depends on M.
+For training and evaluation, `ProteinDataset.from_split` drops the rarer terms from the labels and skips proteins left without any label (MF: 40 train and 9 eval proteins).
+The test split is not filtered and keeps all its GO terms as ground truth.
+
+| Module | Content |
+|---|---|
+| `pfp/encoding.py` | amino acid alphabet, one-hot encoding with padding, truncation and mask |
+| `pfp/data.py` | FASTA reading, vocabularies, label matrices, `ProteinDataset`, batches (`make_loader`) |
+| `pfp/models.py` | model interface (`OntologyModel`), `DummyModel`, model registry `MODELS` |
+| `pfp/predictor.py` | runs the three models batch by batch and writes the CSV |
+| `predict.py` | command line entry point |
+| `tests/test_pipeline.py` | tests of every step (`uv run pytest`) |
+
+To add an architecture, subclass `OntologyModel` in `pfp/models.py`, implement `forward(x, mask)` and add the class to `MODELS`. It is then available as `--model <name>`.

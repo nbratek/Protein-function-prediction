@@ -5,6 +5,8 @@ import subprocess
 
 import pandas as pd
 
+from merge import write_fasta
+
 DATA_DIR = "data/processed"
 SEED = 42
 FRACTIONS = {"train": 0.8, "eval": 0.1, "test": 0.1}
@@ -51,6 +53,7 @@ def main():
     for split in FRACTIONS:
         part = df[df["split"] == split]
         part.to_csv(DATA_DIR + "/" + split + ".tsv", sep="\t", index=False)
+        write_fasta(part, DATA_DIR + "/" + split + ".fasta")  # predictor input
         cluster_sizes = part.groupby("cluster").size()
         print(f"{split}: {len(part)} proteins ({100 * len(part) / len(df):.1f}%), {len(cluster_sizes)} clusters, "
               f"largest cluster {cluster_sizes.max()}, singletons {100 * (cluster_sizes == 1).sum() / len(part):.1f}% of proteins")
